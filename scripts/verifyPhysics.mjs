@@ -191,4 +191,82 @@ function getTheoreticalVrms(temp) {
   console.log(`   ✅ 采样 v_rms=${sampleVrms.toFixed(3)}, 理论 v_rms=${vRmsTheory.toFixed(3)}, 误差 ${(relativeErr * 100).toFixed(2)}% (小于 4%)`);
 }
 
+// 4. 测试摄氏度拟合与反向外推绝对零度
+function calculateCelsiusFit(records) {
+  const n = records.length;
+  let sumt = 0, sumP = 0, sumt2 = 0, sumtP = 0, sumP2 = 0;
+  for (const r of records) {
+    sumt += r.celsius;
+    sumP += r.pressure;
+    sumt2 += r.celsius * r.celsius;
+    sumtP += r.celsius * r.pressure;
+    sumP2 += r.pressure * r.pressure;
+  }
+  const meant = sumt / n;
+  const meanP = sumP / n;
+  let sstt = 0, sstP = 0, ssPP = 0;
+  for (const r of records) {
+    const dt = r.celsius - meant;
+    const dp = r.pressure - meanP;
+    sstt += dt * dt;
+    sstP += dt * dp;
+    ssPP += dp * dp;
+  }
+  const slope = sstP / sstt;
+  const interceptP0 = meanP - slope * meant;
+  let ssRes = 0;
+  for (const r of records) {
+    const pPred = slope * r.celsius + interceptP0;
+    const diff = r.pressure - pPred;
+    ssRes += diff * diff;
+  }
+  const rSquared = ssPP > 0 ? Math.max(0, Math.min(1, 1 - ssRes / ssPP)) : 1;
+  const absoluteZeroT0 = Math.abs(slope) > 1e-6 ? -interceptP0 / slope : -273.15;
+  return { slope, interceptP0, rSquared, absoluteZeroT0, valid: true };
+}
+
+{
+  console.log('4. 测试摄氏度拟合与绝对零度外推:');
+  const celsiusRecords = [
+    { celsius: 20.0, pressure: 101.14 },
+    { celsius: 40.0, pressure: 108.04 },
+    { celsius: 60.0, pressure: 114.94 },
+    { celsius: 80.0, pressure: 121.84 },
+  ];
+  const cFit = calculateCelsiusFit(celsiusRecords);
+  assert.strictEqual(cFit.valid, true);
+  assert(Math.abs(cFit.absoluteZeroT0 - (-273.15)) < 0.2, `外推绝对零度误差: ${cFit.absoluteZeroT0}`);
+  console.log(`   ✅ 摄氏度拟合通过: 斜率 k=${cFit.slope.toFixed(4)}, p0=${cFit.interceptP0.toFixed(2)} kPa, 反向外推绝对零度 t0=${cFit.absoluteZeroT0.toFixed(2)} ℃ (误差 < 0.2℃)`);
+}
+
+// 5. 测试坐标轴刻度整洁算法
+function calculateNiceStep(range, targetTicks = 6) {
+  if (range <= 0) return 10;
+  const rawStep = range / targetTicks;
+  const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  const residual = rawStep / magnitude;
+
+  let niceStep = magnitude;
+  if (residual > 5) {
+    niceStep = 10 * magnitude;
+  } else if (residual > 2) {
+    niceStep = 5 * magnitude;
+  } else if (residual > 1) {
+    niceStep = 2 * magnitude;
+  }
+  return niceStep;
+}
+
+{
+  console.log('5. 测试自适应缩放刻度步长:');
+  const step1 = calculateNiceStep(100, 5); // 20
+  const step2 = calculateNiceStep(25, 5);  // 5
+  const step3 = calculateNiceStep(350, 7); // 50
+  assert.strictEqual(step1, 20);
+  assert.strictEqual(step2, 5);
+  assert.strictEqual(step3, 50);
+  console.log(`   ✅ 刻度步长计算正确: 100/5 -> ${step1}, 25/5 -> ${step2}, 350/7 -> ${step3}`);
+}
+
+
 console.log('🎉 全部物理核心与数据算法单元测试验证通过！');
