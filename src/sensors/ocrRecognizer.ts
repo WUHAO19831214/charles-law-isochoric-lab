@@ -1,7 +1,5 @@
 import { createWorker } from 'tesseract.js';
 
-const DECIMAL_NUMBER = /[+-]?(?:(?:\d+\.\d*)|(?:\d*\.\d+)|(?:\d+))/g;
-
 /**
  * 字符预清洗与字符混淆纠错
  * 继承自 physics-software-sensors/packages/typescript/src/ocr/number.ts
@@ -23,48 +21,81 @@ export interface ExtractedReading {
 /**
  * 从 OCR 原始识别文本中提取压强与温度
  * 针对如 "当前压强: 103.2 kPa 当前温度: 293.8 K" 等常见传感器格式专项优化
+ * 能够完美过滤因中文字符被误识别为数字（如 "当前温度" 被误认为 S188: 或 45188:）的干扰
  */
 export function extractPressureAndTemperature(text: string): ExtractedReading {
   const clean = normalizeOcrText(text);
   let pressure: number | null = null;
   let temperature: number | null = null;
 
-  // 1. 尝试显式关键字匹配
-  const pMatch = clean.match(/(?:压强|强|P|p)[:\s]*([+-]?(?:\d+\.\d+|\d+))\s*(?:kPa|kpa)?/i);
-  if (pMatch && pMatch[1]) {
-    const val = parseFloat(pMatch[1]);
-    if (!isNaN(val)) pressure = val;
+  // 1. 优先通过单位精确锁定 (最高置信度)
+  // 压强: 匹配 kPa / kpa / KPa / Pa 前面的数值
+  const pUnitMatch = clean.match(/([+-]?(?:\d+\.\d+|\d+))\s*(?:kPa|kpa|KPa|Pa)\b/i);
+  if (pUnitMatch) {
+    const val = parseFloat(pUnitMatch[1]);
+    if (!isNaN(val) && val > 10 && val < 500) {
+      pressure = val;
+    }
   }
 
-  const tMatch = clean.match(/(?:温度|度|T|t)[:\s]*([+-]?(?:\d+\.\d+|\d+))\s*(?:K|k|℃|°C)?/i);
-  if (tMatch && tMatch[1]) {
-    const val = parseFloat(tMatch[1]);
-    if (!isNaN(val)) temperature = val;
+  // 温度: 匹配 K / k / ℃ / °C / C 前面的数值 (过滤掉可能连着的单词)
+  const tUnitMatch = clean.match(/([+-]?(?:\d+\.\d+|\d+))\s*(?:K|k|℃|°C|C)\b/);
+  if (tUnitMatch) {
+    const val = parseFloat(tUnitMatch[1]);
+    if (!isNaN(val) && val > -50 && val < 600) {
+      temperature = val;
+    }
   }
 
-  // 2. 如果未匹配到关键字，则按浮点数序列提取
-  const nums = clean.match(DECIMAL_NUMBER);
-  if (nums && nums.length > 0) {
-    const floatList = nums
-      .map((n) => parseFloat(n))
-      .filter((n) => !isNaN(n) && Math.abs(n) > 0.001);
-
-    if (floatList.length >= 2) {
-      if (pressure === null) pressure = floatList[0];
-      if (temperature === null) temperature = floatList[1];
-    } else if (floatList.length === 1) {
-      if (pressure === null && temperature === null) {
-        // 单个数值根据通常物理范围判断
-        if (floatList[0] > 180) {
-          temperature = floatList[0];
-        } else {
-          pressure = floatList[0];
-        }
-      } else if (pressure === null) {
-        pressure = floatList[0];
-      } else if (temperature === null) {
-        temperature = floatList[0];
+  // 2. 如果未通过单位匹配到，尝试通过显式关键字定位
+  if (pressure === null) {
+    const pKeyMatch = clean.match(/(?:压强|强|P|p)[:\s]*([+-]?(?:\d+\.\d+|\d+))/i);
+    if (pKeyMatch) {
+      const val = parseFloat(pKeyMatch[1]);
+      if (!isNaN(val) && val > 10 && val < 500) {
+        pressure = val;
       }
+    }
+  }
+
+  if (temperature === null) {
+    const tKeyMatch = clean.match(/(?:温度|度|T|t)[:\s]*([+-]?(?:\d+\.\d+|\d+))/i);
+    if (tKeyMatch) {
+      const val = parseFloat(tKeyMatch[1]);
+      if (!isNaN(val) && val > -50 && val < 600) {
+        temperature = val;
+      }
+    }
+  }
+
+  // 3. 针对 ": 293.8" 这类跟在中文冒号或乱码标签后的浮点数
+  if (temperature === null) {
+    const colonMatches = [...clean.matchAll(/[:：]\s*([+-]?(?:\d+\.\d+|\d+))/g)];
+    for (const m of colonMatches) {
+      const val = parseFloat(m[1]);
+      if (!isNaN(val) && val > -50 && val < 600 && val !== pressure) {
+        temperature = val;
+        break;
+      }
+    }
+  }
+
+  // 4. 容错兜底: 提取所有合理的实数 (排除 > 600 的异常干扰数如 45188)
+  if (pressure === null || temperature === null) {
+    const allNums = (clean.match(/[+-]?(?:\d+\.\d+|\d+)/g) || [])
+      .map(Number)
+      .filter((n) => !isNaN(n) && n > 0 && n < 600);
+
+    // 优先带小数点的候选
+    const withDecimals = allNums.filter((n) => !Number.isInteger(n));
+    const candidates = withDecimals.length >= 2 ? withDecimals : allNums;
+
+    if (pressure === null && candidates.length > 0) {
+      pressure = candidates[0];
+    }
+    if (temperature === null && candidates.length > 1) {
+      const second = candidates.find((c) => c !== pressure) || candidates[1];
+      temperature = second;
     }
   }
 
@@ -83,7 +114,6 @@ export class OcrRecognizerService {
     this.isInitializing = true;
     try {
       this.worker = await createWorker('eng');
-      // 设置宽松的识别模式，避免因中文丢弃数字和符号
       await this.worker.setParameters({
         tessedit_pageseg_mode: '6', // 假设单一均匀文本块
       });

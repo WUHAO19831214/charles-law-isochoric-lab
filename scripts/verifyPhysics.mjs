@@ -7,44 +7,98 @@ function normalizeOcrText(text) {
   return text
     .replace(/[Oo]/g, '0')
     .replace(/[Il|]/g, '1')
-    .replace(/S/g, '5')
-    .replace(/B/g, '8')
     .replace(/[，,]/g, '.')
-    .replace(/\s+/g, '')
-    .replace(/[^0-9+\-.]/g, '');
+    .replace(/：/g, ':');
 }
 
-function extractNumberFromText(text) {
-  const DECIMAL_NUMBER = /[+-]?(?:(?:\d+\.\d*)|(?:\d*\.\d+)|(?:\d+))/g;
-  const normalized = normalizeOcrText(text);
-  const matches = normalized.match(DECIMAL_NUMBER);
-  if (!matches || matches.length === 0) return null;
+function extractPressureAndTemperature(text) {
+  const clean = normalizeOcrText(text);
+  let pressure = null;
+  let temperature = null;
 
-  const candidates = matches
-    .map((candidate) => ({ text: candidate, value: Number(candidate) }))
-    .filter((candidate) => Number.isFinite(candidate.value))
-    .sort((left, right) => {
-      const leftHasDecimal = left.text.includes('.') ? 1 : 0;
-      const rightHasDecimal = right.text.includes('.') ? 1 : 0;
-      const leftLength = left.text.replace(/[+-.]/g, '').length;
-      const rightLength = right.text.replace(/[+-.]/g, '').length;
-      return rightHasDecimal - leftHasDecimal || rightLength - leftLength;
-    });
+  // 1. 优先通过单位精确锁定
+  const pUnitMatch = clean.match(/([+-]?(?:\d+\.\d+|\d+))\s*(?:kPa|kpa|KPa|Pa)\b/i);
+  if (pUnitMatch) {
+    const val = parseFloat(pUnitMatch[1]);
+    if (!isNaN(val) && val > 10 && val < 500) {
+      pressure = val;
+    }
+  }
 
-  const val = candidates[0]?.value;
-  return val !== undefined && Number.isFinite(val) ? val : null;
+  const tUnitMatch = clean.match(/([+-]?(?:\d+\.\d+|\d+))\s*(?:K|k|℃|°C|C)\b/);
+  if (tUnitMatch) {
+    const val = parseFloat(tUnitMatch[1]);
+    if (!isNaN(val) && val > -50 && val < 600) {
+      temperature = val;
+    }
+  }
+
+  // 2. 关键字定位
+  if (pressure === null) {
+    const pKeyMatch = clean.match(/(?:压强|强|P|p)[:\s]*([+-]?(?:\d+\.\d+|\d+))/i);
+    if (pKeyMatch) {
+      const val = parseFloat(pKeyMatch[1]);
+      if (!isNaN(val) && val > 10 && val < 500) pressure = val;
+    }
+  }
+
+  if (temperature === null) {
+    const tKeyMatch = clean.match(/(?:温度|度|T|t)[:\s]*([+-]?(?:\d+\.\d+|\d+))/i);
+    if (tKeyMatch) {
+      const val = parseFloat(tKeyMatch[1]);
+      if (!isNaN(val) && val > -50 && val < 600) temperature = val;
+    }
+  }
+
+  // 3. 冒号后浮点数定位
+  if (temperature === null) {
+    const colonMatches = [...clean.matchAll(/[:：]\s*([+-]?(?:\d+\.\d+|\d+))/g)];
+    for (const m of colonMatches) {
+      const val = parseFloat(m[1]);
+      if (!isNaN(val) && val > -50 && val < 600 && val !== pressure) {
+        temperature = val;
+        break;
+      }
+    }
+  }
+
+  // 4. 容错候选
+  if (pressure === null || temperature === null) {
+    const allNums = (clean.match(/[+-]?(?:\d+\.\d+|\d+)/g) || [])
+      .map(Number)
+      .filter((n) => !isNaN(n) && n > 0 && n < 600);
+
+    const withDecimals = allNums.filter((n) => !Number.isInteger(n));
+    const candidates = withDecimals.length >= 2 ? withDecimals : allNums;
+
+    if (pressure === null && candidates.length > 0) {
+      pressure = candidates[0];
+    }
+    if (temperature === null && candidates.length > 1) {
+      const second = candidates.find((c) => c !== pressure) || candidates[1];
+      temperature = second;
+    }
+  }
+
+  return { pressure, temperature, rawText: text };
 }
 
 {
-  console.log('1. 测试 OCR 字符清洗与浮点数提取:');
-  assert.strictEqual(normalizeOcrText('lO3.2 kPa'), '103.2');
-  assert.strictEqual(normalizeOcrText('293，8 K'), '293.8');
-  assert.strictEqual(normalizeOcrText('p = S8.4'), '58.4');
+  console.log('1. 测试真实 DISLab 截图中双参提取 (针对 S188: / 45188: 干扰):');
+  // 用户提供的两张实际报错截图中的 OCR 原文
+  const res1 = extractPressureAndTemperature('103.2 kPa S188: 293.8 K R=,');
+  assert.strictEqual(res1.pressure, 103.2);
+  assert.strictEqual(res1.temperature, 293.8);
 
-  assert.strictEqual(extractNumberFromText('当前压强: 103.2 kPa'), 103.2);
-  assert.strictEqual(extractNumberFromText('当前温度: 293.8 K'), 293.8);
-  assert.strictEqual(extractNumberFromText('Temp: 25.4 C'), 25.4);
-  console.log('   ✅ OCR 纠错与数字提取测试通过');
+  const res2 = extractPressureAndTemperature('105.0 kPa 45188: 298.9 K R=,');
+  assert.strictEqual(res2.pressure, 105.0);
+  assert.strictEqual(res2.temperature, 298.9);
+
+  const res3 = extractPressureAndTemperature('当前压强: 103.2 kPa 当前温度: 293.8 K');
+  assert.strictEqual(res3.pressure, 103.2);
+  assert.strictEqual(res3.temperature, 293.8);
+
+  console.log('   ✅ 真实截图测试通过: 成功过滤中文字符混淆数字，精准抽取 103.2 kPa 与 293.8 K');
 }
 
 // 2. 查理定律最小二乘线性拟合与过原点约束
