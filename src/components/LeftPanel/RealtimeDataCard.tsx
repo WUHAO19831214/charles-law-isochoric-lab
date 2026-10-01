@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Monitor,
   Crop,
@@ -6,11 +6,10 @@ import {
   Pause,
   RotateCcw,
   CheckCircle2,
-  VideoOff,
   Crosshair,
-  Sparkles,
   Maximize2,
   Minimize2,
+  HelpCircle,
 } from 'lucide-react';
 import { SensorReading, WorkbenchMode } from '../../types/physics';
 
@@ -60,10 +59,13 @@ export const RealtimeDataCard: React.FC<RealtimeDataCardProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const previewCanvasRef = useRef<HTMLCanvasElement>(null);
+
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPos, setStartPos] = useState<{ x: number; y: number } | null>(null);
   const [currentBox, setCurrentBox] = useState<RoiRect>(roi);
   const [isExpanded, setIsExpanded] = useState(false);
+  const [videoAspect, setVideoAspect] = useState<number>(16 / 9);
 
   // 同步外部 ROI
   useEffect(() => {
@@ -78,28 +80,80 @@ export const RealtimeDataCard: React.FC<RealtimeDataCardProps> = ({
     }
   }, [screenStream, isCapturingScreen]);
 
+  // 监听视频实际宽高比，使容器零黑边完全贴合视频，确保鼠标点击与像素 1:1 精确对应
+  const handleLoadedMetadata = () => {
+    if (videoRef.current && videoRef.current.videoWidth > 0 && videoRef.current.videoHeight > 0) {
+      const aspect = videoRef.current.videoWidth / videoRef.current.videoHeight;
+      setVideoAspect(aspect);
+    }
+  };
+
+  // 渲染裁切画面快照到小预览画布上
+  useEffect(() => {
+    if (previewCanvasRef.current && latestRoiCanvas) {
+      const canvas = previewCanvasRef.current;
+      canvas.width = latestRoiCanvas.width;
+      canvas.height = latestRoiCanvas.height;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(latestRoiCanvas, 0, 0);
+      }
+    }
+  }, [latestRoiCanvas]);
+
+  // 精准计算视频实际渲染区域与鼠标相对位置（消除 letterbox 偏差）
+  const getRelativeCoords = useCallback(
+    (clientX: number, clientY: number) => {
+      const video = videoRef.current;
+      if (!video) return { x: 0, y: 0 };
+
+      const rect = video.getBoundingClientRect();
+      const vw = video.videoWidth || rect.width;
+      const vh = video.videoHeight || rect.height;
+      const videoRatio = vw / vh;
+      const elementRatio = rect.width / rect.height;
+
+      let renderW = rect.width;
+      let renderH = rect.height;
+      let offX = 0;
+      let offY = 0;
+
+      if (elementRatio > videoRatio) {
+        renderW = rect.height * videoRatio;
+        offX = (rect.width - renderW) / 2;
+      } else {
+        renderH = rect.width / videoRatio;
+        offY = (rect.height - renderH) / 2;
+      }
+
+      const relX = clientX - rect.left - offX;
+      const relY = clientY - rect.top - offY;
+
+      const normX = Math.max(0, Math.min(1, relX / renderW));
+      const normY = Math.max(0, Math.min(1, relY / renderH));
+
+      return { x: normX, y: normY, renderW, renderH, offX, offY };
+    },
+    []
+  );
+
   // 处理在映射窗口上直接拖拽框选 ROI
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
-
+    const coords = getRelativeCoords(e.clientX, e.clientY);
     setIsDrawing(true);
-    setStartPos({ x, y });
-    setCurrentBox({ x, y, width: 0.05, height: 0.05 });
+    setStartPos({ x: coords.x, y: coords.y });
+    setCurrentBox({ x: coords.x, y: coords.y, width: 0.05, height: 0.05 });
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isDrawing || !startPos || !containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const currX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const currY = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+    if (!isDrawing || !startPos) return;
+    const coords = getRelativeCoords(e.clientX, e.clientY);
 
-    const x = Math.min(startPos.x, currX);
-    const y = Math.min(startPos.y, currY);
-    const width = Math.max(0.04, Math.abs(currX - startPos.x));
-    const height = Math.max(0.03, Math.abs(currY - startPos.y));
+    const x = Math.min(startPos.x, coords.x);
+    const y = Math.min(startPos.y, coords.y);
+    const width = Math.max(0.04, Math.abs(coords.x - startPos.x));
+    const height = Math.max(0.03, Math.abs(coords.y - startPos.y));
 
     setCurrentBox({ x, y, width, height });
   };
@@ -112,15 +166,14 @@ export const RealtimeDataCard: React.FC<RealtimeDataCardProps> = ({
     }
   };
 
-  // 预设选区：DISLab 底部读数行
+  // 预设选区：DISLab 底部读数行 (充足余量确保当前压强与温度两边都不被裁剪)
   const applyDislabPreset = (e: React.MouseEvent) => {
     e.stopPropagation();
-    // 朗威 DISLab 查理定律专用软件界面中，当前压强/温度读数行通常位于中下部约 70%~82% 高度处
     const preset: RoiRect = {
-      x: 0.02,
-      y: 0.72,
-      width: 0.60,
-      height: 0.10,
+      x: 0.01,
+      y: 0.73,
+      width: 0.70,
+      height: 0.12,
     };
     setCurrentBox(preset);
     onRoiChange(preset);
@@ -133,7 +186,7 @@ export const RealtimeDataCard: React.FC<RealtimeDataCardProps> = ({
         <div className="flex items-center space-x-2">
           <span>实时数据窗口</span>
           <span className="text-[10px] font-normal px-1.5 py-0.5 rounded bg-blue-700/80 border border-blue-400/40">
-            {mode === 'demo' ? '模拟演示信号' : isCapturingScreen ? '窗口已映射 · 实时识别' : '屏幕 OCR 捕获'}
+            {mode === 'demo' ? '模拟演示信号' : isCapturingScreen ? '窗口已映射 · 实时框选' : '屏幕 OCR 捕获'}
           </span>
         </div>
         <div className="flex items-center space-x-1.5 text-xs font-normal">
@@ -147,7 +200,7 @@ export const RealtimeDataCard: React.FC<RealtimeDataCardProps> = ({
             }`}
           />
           <span className="text-blue-100 text-[11px]">
-            {reading.status === 'valid' ? '信号正常' : reading.statusMessage || '数值保持中'}
+            {reading.status === 'valid' ? '识别正常' : reading.statusMessage || '保持上一帧读数'}
           </span>
         </div>
       </div>
@@ -215,9 +268,10 @@ export const RealtimeDataCard: React.FC<RealtimeDataCardProps> = ({
                   onMouseDown={handleMouseDown}
                   onMouseMove={handleMouseMove}
                   onMouseUp={handleMouseUp}
+                  style={{ aspectRatio: isExpanded ? undefined : `${videoAspect}` }}
                   className={`relative w-full ${
-                    isExpanded ? 'h-[280px]' : 'h-[170px]'
-                  } bg-black rounded-lg overflow-hidden border-2 border-slate-700 select-none cursor-crosshair shadow-inner transition-all`}
+                    isExpanded ? 'h-[280px]' : 'max-h-[220px]'
+                  } bg-black rounded-lg overflow-hidden border-2 border-slate-700 select-none cursor-crosshair shadow-inner transition-all flex items-center justify-center`}
                 >
                   {/* 映射的窗口实时视频 */}
                   <video
@@ -225,6 +279,7 @@ export const RealtimeDataCard: React.FC<RealtimeDataCardProps> = ({
                     autoPlay
                     playsInline
                     muted
+                    onLoadedMetadata={handleLoadedMetadata}
                     className="w-full h-full object-contain pointer-events-none"
                   />
 
@@ -240,7 +295,7 @@ export const RealtimeDataCard: React.FC<RealtimeDataCardProps> = ({
                   >
                     {/* 标牌指示 */}
                     <div className="absolute -top-5 left-0 bg-emerald-600 text-white text-[9px] font-mono px-1.5 py-0.2 rounded shadow whitespace-nowrap">
-                      识别区域 (压强 & 温度)
+                      识别区域 [压强 & 温度]
                     </div>
                     {/* 四角抓手视觉标示 */}
                     <div className="absolute -top-1 -left-1 w-2 h-2 bg-emerald-300 border border-emerald-700" />
@@ -289,19 +344,27 @@ export const RealtimeDataCard: React.FC<RealtimeDataCardProps> = ({
             </div>
           </div>
 
-          {/* 实时 OCR 截取切片预览 (仿附图显示裁剪下来的真实传感器文字) */}
+          {/* 实时 OCR 截取切片画面真实预览 (如用户原型图展示，直观所见即所得) */}
           {mode === 'screen-sensor' && isCapturingScreen && (
-            <div className="bg-slate-950/80 rounded-lg p-2 border border-slate-800 space-y-1">
+            <div className="bg-slate-950/80 rounded-lg p-2 border border-slate-800 space-y-1.5">
               <div className="flex items-center justify-between text-[11px] text-slate-400">
-                <span>选区当前裁切画面与识别原文:</span>
+                <span className="font-semibold text-slate-300">选区实际裁切画面 (实时送入 OCR):</span>
                 <span className="font-mono text-emerald-400">
                   置信度: {(reading.confidence * 100).toFixed(0)}%
                 </span>
               </div>
-              <div className="bg-slate-900 rounded p-1.5 border border-slate-800 flex items-center justify-between gap-2 overflow-hidden">
-                <div className="text-[11px] font-mono text-slate-200 truncate flex-1">
-                  {rawOcrText ? `OCR文本: "${rawOcrText}"` : '正在解析框选区域文字...'}
-                </div>
+
+              {/* 真实裁切图像直接展示 */}
+              <div className="bg-white rounded p-1 border border-slate-700 flex items-center justify-center overflow-hidden">
+                <canvas
+                  ref={previewCanvasRef}
+                  className="max-h-9 w-auto max-w-full object-contain"
+                />
+              </div>
+
+              {/* 识别文本回显 */}
+              <div className="text-[11px] font-mono text-slate-300 bg-slate-900 px-2 py-1 rounded border border-slate-800 truncate">
+                {rawOcrText ? `OCR文本: "${rawOcrText}"` : '正在解析框选区域文字...'}
               </div>
             </div>
           )}

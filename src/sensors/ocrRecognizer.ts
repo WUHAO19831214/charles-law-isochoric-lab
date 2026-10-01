@@ -21,81 +21,76 @@ export interface ExtractedReading {
 /**
  * 从 OCR 原始识别文本中提取压强与温度
  * 针对如 "当前压强: 103.2 kPa 当前温度: 293.8 K" 等常见传感器格式专项优化
- * 能够完美过滤因中文字符被误识别为数字（如 "当前温度" 被误认为 S188: 或 45188:）的干扰
+ * 增加词边界 \b 与物理量范围校验 (压强 50~300 kPa, 温度 200~450 K 或 -20~150 ℃)，彻底根除把杂散字母识别出的伪数字填入问题
  */
 export function extractPressureAndTemperature(text: string): ExtractedReading {
   const clean = normalizeOcrText(text);
   let pressure: number | null = null;
   let temperature: number | null = null;
 
-  // 1. 优先通过单位精确锁定 (最高置信度)
-  // 压强: 匹配 kPa / kpa / KPa / Pa 前面的数值
-  const pUnitMatch = clean.match(/([+-]?(?:\d+\.\d+|\d+))\s*(?:kPa|kpa|KPa|Pa)\b/i);
-  if (pUnitMatch) {
-    const val = parseFloat(pUnitMatch[1]);
-    if (!isNaN(val) && val > 10 && val < 500) {
+  // 1. 压强匹配：优先寻找紧挨 kPa/Pa 的数值，且必须处于合理物理气压区间 (50 ~ 300 kPa)
+  const pMatches = [...clean.matchAll(/\b([+-]?(?:\d+\.\d+|\d+))\s*(?:kPa|kpa|KPa|Pa)\b/gi)];
+  for (const m of pMatches) {
+    const val = parseFloat(m[1]);
+    if (!isNaN(val) && val >= 50 && val <= 300) {
       pressure = val;
+      break;
     }
   }
 
-  // 温度: 匹配 K / k / ℃ / °C / C 前面的数值 (过滤掉可能连着的单词)
-  const tUnitMatch = clean.match(/([+-]?(?:\d+\.\d+|\d+))\s*(?:K|k|℃|°C|C)\b/);
-  if (tUnitMatch) {
-    const val = parseFloat(tUnitMatch[1]);
-    if (!isNaN(val) && val > -50 && val < 600) {
+  // 2. 温度匹配：优先寻找紧挨 K / ℃ / °C 的数值，且处于合理物理温度区间 (开尔文 200~450 或 摄氏度 -20~150)
+  const tMatches = [...clean.matchAll(/\b([+-]?(?:\d+\.\d+|\d+))\s*(?:K|k|℃|°C)\b/g)];
+  for (const m of tMatches) {
+    const val = parseFloat(m[1]);
+    if (!isNaN(val) && ((val >= 200 && val <= 450) || (val >= -20 && val <= 150))) {
       temperature = val;
+      break;
     }
   }
 
-  // 2. 如果未通过单位匹配到，尝试通过显式关键字定位
+  // 3. 中文冒号后关键字定位 (例如 "压强: 105.0", "温度: 298.9")
   if (pressure === null) {
-    const pKeyMatch = clean.match(/(?:压强|强|P|p)[:\s]*([+-]?(?:\d+\.\d+|\d+))/i);
-    if (pKeyMatch) {
-      const val = parseFloat(pKeyMatch[1]);
-      if (!isNaN(val) && val > 10 && val < 500) {
+    const pKey = clean.match(/(?:压强|强|P)[:\s]*\b([+-]?(?:\d+\.\d+|\d+))\b/i);
+    if (pKey) {
+      const val = parseFloat(pKey[1]);
+      if (!isNaN(val) && val >= 50 && val <= 300) {
         pressure = val;
       }
     }
   }
 
   if (temperature === null) {
-    const tKeyMatch = clean.match(/(?:温度|度|T|t)[:\s]*([+-]?(?:\d+\.\d+|\d+))/i);
-    if (tKeyMatch) {
-      const val = parseFloat(tKeyMatch[1]);
-      if (!isNaN(val) && val > -50 && val < 600) {
+    const tKey = clean.match(/(?:温度|度|T)[:\s]*\b([+-]?(?:\d+\.\d+|\d+))\b/i);
+    if (tKey) {
+      const val = parseFloat(tKey[1]);
+      if (!isNaN(val) && ((val >= 200 && val <= 450) || (val >= -20 && val <= 150))) {
         temperature = val;
       }
     }
   }
 
-  // 3. 针对 ": 293.8" 这类跟在中文冒号或乱码标签后的浮点数
-  if (temperature === null) {
-    const colonMatches = [...clean.matchAll(/[:：]\s*([+-]?(?:\d+\.\d+|\d+))/g)];
-    for (const m of colonMatches) {
-      const val = parseFloat(m[1]);
-      if (!isNaN(val) && val > -50 && val < 600 && val !== pressure) {
-        temperature = val;
-        break;
-      }
-    }
-  }
-
-  // 4. 容错兜底: 提取所有合理的实数 (排除 > 600 的异常干扰数如 45188)
+  // 4. 词边界独立浮点数兜底 (严格要求独立词边界 \b，绝不取 HE1SE 或 45188 等嵌入字母中的数字)
   if (pressure === null || temperature === null) {
-    const allNums = (clean.match(/[+-]?(?:\d+\.\d+|\d+)/g) || [])
+    const standaloneNums = (clean.match(/\b[+-]?(?:\d+\.\d+|\d+)\b/g) || [])
       .map(Number)
-      .filter((n) => !isNaN(n) && n > 0 && n < 600);
+      .filter((n) => !isNaN(n));
 
-    // 优先带小数点的候选
-    const withDecimals = allNums.filter((n) => !Number.isInteger(n));
-    const candidates = withDecimals.length >= 2 ? withDecimals : allNums;
-
-    if (pressure === null && candidates.length > 0) {
-      pressure = candidates[0];
+    // 压强优先在 50~200 kPa 范围内寻找
+    if (pressure === null) {
+      const pCandidate = standaloneNums.find((n) => n >= 50 && n <= 200 && n !== temperature);
+      if (pCandidate !== undefined) {
+        pressure = pCandidate;
+      }
     }
-    if (temperature === null && candidates.length > 1) {
-      const second = candidates.find((c) => c !== pressure) || candidates[1];
-      temperature = second;
+
+    // 温度在 200~450 K 或 -20~150 ℃ 范围内寻找
+    if (temperature === null) {
+      const tCandidate = standaloneNums.find(
+        (n) => n !== pressure && ((n >= 200 && n <= 450) || (n >= -20 && n <= 150))
+      );
+      if (tCandidate !== undefined) {
+        temperature = tCandidate;
+      }
     }
   }
 

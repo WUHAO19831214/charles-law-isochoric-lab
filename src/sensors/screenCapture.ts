@@ -91,48 +91,44 @@ export class ScreenCaptureManager {
 
   /**
    * 截取当前帧画面并裁切指定归一化 ROI (x, y, width, height 在 0..1)
+   * 优化：双立方平滑 2.5x 放大 + 边缘安全外扩，绝不生硬剪裁破坏笔画
    */
   public captureRoi(roi: { x: number; y: number; width: number; height: number }): CapturedRoiFrame | null {
     if (!this.active || !this.video || !this.ctx || !this.canvas) return null;
     if (this.video.videoWidth === 0 || this.video.videoHeight === 0) return null;
 
-    const w = this.video.videoWidth;
-    const h = this.video.videoHeight;
-    this.canvas.width = w;
-    this.canvas.height = h;
+    const vw = this.video.videoWidth;
+    const vh = this.video.videoHeight;
+    this.canvas.width = vw;
+    this.canvas.height = vh;
 
-    this.ctx.drawImage(this.video, 0, 0, w, h);
+    this.ctx.drawImage(this.video, 0, 0, vw, vh);
 
-    // 计算实际像素区域
-    const sx = Math.max(0, Math.min(w - 1, Math.floor(roi.x * w)));
-    const sy = Math.max(0, Math.min(h - 1, Math.floor(roi.y * h)));
-    const sw = Math.max(10, Math.min(w - sx, Math.floor(roi.width * w)));
-    const sh = Math.max(10, Math.min(h - sy, Math.floor(roi.height * h)));
+    // 计算实际像素选区并加入边缘保护 padding
+    const paddingX = Math.round(vw * 0.005);
+    const paddingY = Math.round(vh * 0.005);
+
+    const sx = Math.max(0, Math.floor(roi.x * vw) - paddingX);
+    const sy = Math.max(0, Math.floor(roi.y * vh) - paddingY);
+    const sw = Math.min(vw - sx, Math.floor(roi.width * vw) + paddingX * 2);
+    const sh = Math.min(vh - sy, Math.floor(roi.height * vh) + paddingY * 2);
+
+    if (sw <= 10 || sh <= 10) return null;
+
+    // 缩放到 OCR 最佳字高 (字高 40~60px 为佳，通常缩放 2~3 倍)
+    const scale = Math.max(1.8, Math.min(3.5, 120 / Math.max(20, sh)));
+    const targetW = Math.round(sw * scale);
+    const targetH = Math.round(sh * scale);
 
     const roiCanvas = document.createElement('canvas');
-    roiCanvas.width = sw;
-    roiCanvas.height = sh;
+    roiCanvas.width = targetW;
+    roiCanvas.height = targetH;
     const roiCtx = roiCanvas.getContext('2d', { willReadFrequently: true });
 
     if (roiCtx) {
-      roiCtx.drawImage(this.canvas, sx, sy, sw, sh, 0, 0, sw, sh);
-
-      // 图像预处理增强对比度（灰度化 + 适度锐化，使 OCR 识别准确率翻倍）
-      try {
-        const imgData = roiCtx.getImageData(0, 0, sw, sh);
-        const data = imgData.data;
-        for (let i = 0; i < data.length; i += 4) {
-          const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-          // 自适应二值化增强
-          const binary = gray > 140 ? 255 : 0;
-          data[i] = binary;
-          data[i + 1] = binary;
-          data[i + 2] = binary;
-        }
-        roiCtx.putImageData(imgData, 0, 0);
-      } catch (e) {
-        // 忽略跨域像素安全错误
-      }
+      roiCtx.imageSmoothingEnabled = true;
+      roiCtx.imageSmoothingQuality = 'high';
+      roiCtx.drawImage(this.canvas, sx, sy, sw, sh, 0, 0, targetW, targetH);
     }
 
     return {
