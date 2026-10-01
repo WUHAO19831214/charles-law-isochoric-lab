@@ -5,14 +5,12 @@ import { DataTable } from './components/LeftPanel/DataTable';
 import { PTChart } from './components/LeftPanel/PTChart';
 import { CameraFeed } from './components/CenterPanel/CameraFeed';
 import { MolecularWorkbench } from './components/RightPanel/MolecularWorkbench';
-import { ScreenRoiModal } from './components/LeftPanel/ScreenRoiModal';
 import { HelpModal } from './components/HelpModal';
 
 import {
   ExperimentRecord,
   SensorReading,
   WorkbenchMode,
-  RoiBox,
   ReplayState,
 } from './types/physics';
 import { MockDataGenerator } from './sensors/mockDataGenerator';
@@ -23,22 +21,23 @@ import { exportToCSV } from './utils/exportData';
 
 export const App: React.FC = () => {
   // 1. 工作模式
-  const [mode, setMode] = useState<WorkbenchMode>('demo');
+  const [mode, setMode] = useState<WorkbenchMode>('screen-sensor');
   const [showHelp, setShowHelp] = useState(false);
   const [showCelsiusConversion, setShowCelsiusConversion] = useState(true);
 
   // 2. 实时感知数据
   const [reading, setReading] = useState<SensorReading>({
-    pressure: 101.32,
-    temperature: 293.15,
-    celsius: 20.0,
+    pressure: 103.2,
+    temperature: 293.8,
+    celsius: 20.65,
     volume: 50.0,
     status: 'valid',
-    confidence: 0.98,
+    confidence: 0.95,
     lastUpdated: Date.now(),
+    statusMessage: '就绪',
   });
 
-  // 3. 服务实例保持
+  // 3. 服务实例与屏幕映射状态
   const mockGenRef = useRef<MockDataGenerator | null>(null);
   const screenCapRef = useRef<ScreenCaptureManager>(new ScreenCaptureManager());
   const ocrServiceRef = useRef<OcrRecognizerService>(new OcrRecognizerService());
@@ -46,24 +45,16 @@ export const App: React.FC = () => {
 
   const [isSimulating, setIsSimulating] = useState(false);
   const [isCapturingScreen, setIsCapturingScreen] = useState(false);
-  const [isRoiModalOpen, setIsRoiModalOpen] = useState(false);
+  const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
+  const [latestRoiCanvas, setLatestRoiCanvas] = useState<HTMLCanvasElement | null>(null);
+  const [rawOcrText, setRawOcrText] = useState<string>('');
 
-  // ROI 选区预设 (压强左，温度右)
-  const [pRoi, setPRoi] = useState<RoiBox>({
-    id: 'pressure',
-    name: '压强 ROI',
-    x: 0.05,
-    y: 0.2,
-    width: 0.42,
-    height: 0.45,
-  });
-  const [tRoi, setTRoi] = useState<RoiBox>({
-    id: 'temperature',
-    name: '温度 ROI',
-    x: 0.52,
-    y: 0.2,
-    width: 0.42,
-    height: 0.45,
+  // 映射窗口上的单一统一识别选区 (默认预设在 DISLab 下半部读数区域)
+  const [roi, setRoi] = useState<{ x: number; y: number; width: number; height: number }>({
+    x: 0.02,
+    y: 0.72,
+    width: 0.60,
+    height: 0.10,
   });
 
   // 4. 表格记录管理
@@ -83,7 +74,7 @@ export const App: React.FC = () => {
     maxTime: 0,
   });
 
-  // 初始化模拟信号发生器
+  // 初始化模拟发生器与 OCR
   useEffect(() => {
     const gen = new MockDataGenerator((newReading) => {
       setReading({
@@ -93,9 +84,11 @@ export const App: React.FC = () => {
     });
     mockGenRef.current = gen;
 
-    // 默认演示模式自启动模拟发生器提供基础读数
-    const initial = gen.generateCurrentReading();
-    setReading({ ...initial, volume: defaultVolume });
+    // 监听屏幕共享结束
+    screenCapRef.current.setOnEnded(() => {
+      setIsCapturingScreen(false);
+      setScreenStream(null);
+    });
 
     return () => {
       gen.stop();
@@ -103,7 +96,7 @@ export const App: React.FC = () => {
       ocrServiceRef.current.terminate();
       cameraManagerRef.current.stopStream();
     };
-  }, []);
+  }, [defaultVolume]);
 
   // 模式切换时响应
   const handleModeChange = (newMode: WorkbenchMode) => {
@@ -112,6 +105,7 @@ export const App: React.FC = () => {
       if (isCapturingScreen) {
         screenCapRef.current.stopCapture();
         setIsCapturingScreen(false);
+        setScreenStream(null);
       }
     } else {
       if (isSimulating) {
@@ -140,64 +134,88 @@ export const App: React.FC = () => {
     mockGenRef.current?.setManualTemperature(tempK);
   };
 
-  // 屏幕捕获与 OCR 循环
+  // 启动屏幕捕获并直接映射
   const handleStartScreenCapture = async () => {
-    const ok = await screenCapRef.current.startCapture();
-    if (ok) {
-      setIsCapturingScreen(true);
-      await ocrServiceRef.current.init();
+    try {
+      const stream = await screenCapRef.current.startCapture();
+      if (stream) {
+        setScreenStream(stream);
+        setIsCapturingScreen(true);
+        setMode('screen-sensor');
+        await ocrServiceRef.current.init();
+      }
+    } catch (err) {
+      console.error('启动窗口共享失败:', err);
     }
   };
 
   const handleStopScreenCapture = () => {
     screenCapRef.current.stopCapture();
     setIsCapturingScreen(false);
+    setScreenStream(null);
   };
 
-  // 定时执行 OCR 识别
+  // 定时执行 OCR 识别循环 (从用户直接框选的映射区域切取)
   useEffect(() => {
     if (!isCapturingScreen || mode !== 'screen-sensor') return;
 
+    let isBusy = false;
     const intervalId = window.setInterval(async () => {
-      const frame = screenCapRef.current.captureFrame(pRoi, tRoi);
-      if (!frame || !frame.pressureCanvas || !frame.temperatureCanvas) return;
+      if (isBusy) return;
+      isBusy = true;
 
-      const pResult = await ocrServiceRef.current.recognizeNumber(frame.pressureCanvas);
-      const tResult = await ocrServiceRef.current.recognizeNumber(frame.temperatureCanvas);
-
-      setReading((prev) => {
-        let pVal = pResult.value !== null ? pResult.value : prev.pressure;
-        let tVal = tResult.value !== null ? tResult.value : prev.temperature;
-
-        // 如果识别到的数值小于 150，通常为摄氏度，根据设置自动换算
-        let celsius = tVal;
-        let kelvin = tVal;
-        if (showCelsiusConversion) {
-          if (tVal < 200) {
-            celsius = tVal;
-            kelvin = tVal + 273.15;
-          } else {
-            kelvin = tVal;
-            celsius = tVal - 273.15;
-          }
+      try {
+        const frame = screenCapRef.current.captureRoi(roi);
+        if (!frame || !frame.roiCanvas) {
+          isBusy = false;
+          return;
         }
 
-        const valid = pResult.value !== null && tResult.value !== null;
-        return {
-          pressure: Number(pVal.toFixed(2)),
-          temperature: Number(kelvin.toFixed(2)),
-          celsius: Number(celsius.toFixed(2)),
-          volume: defaultVolume,
-          status: valid ? 'valid' : 'holding',
-          confidence: Math.min(pResult.confidence, tResult.confidence) || 0.85,
-          lastUpdated: Date.now(),
-          statusMessage: valid ? 'OCR 识别正常' : '数值保持中',
-        };
-      });
-    }, 1200);
+        setLatestRoiCanvas(frame.roiCanvas);
+
+        const result = await ocrServiceRef.current.recognizeRoi(frame.roiCanvas);
+        if (result.rawText) {
+          setRawOcrText(result.rawText);
+        }
+
+        setReading((prev) => {
+          let pVal = result.pressure !== null ? result.pressure : prev.pressure;
+          let tVal = result.temperature !== null ? result.temperature : prev.temperature;
+
+          // 摄氏度 / 开尔文处理
+          let celsius = tVal;
+          let kelvin = tVal;
+          if (showCelsiusConversion) {
+            if (tVal < 180) {
+              celsius = tVal;
+              kelvin = tVal + 273.15;
+            } else {
+              kelvin = tVal;
+              celsius = tVal - 273.15;
+            }
+          }
+
+          const hasValidData = result.pressure !== null || result.temperature !== null;
+          return {
+            pressure: Number(pVal.toFixed(1)),
+            temperature: Number(kelvin.toFixed(1)),
+            celsius: Number(celsius.toFixed(1)),
+            volume: defaultVolume,
+            status: hasValidData ? 'valid' : 'holding',
+            confidence: result.confidence || 0.9,
+            lastUpdated: Date.now(),
+            statusMessage: hasValidData ? 'OCR 识别正常' : '保持上一帧读数',
+          };
+        });
+      } catch (err) {
+        console.error('OCR 定时轮询异常:', err);
+      } finally {
+        isBusy = false;
+      }
+    }, 800);
 
     return () => clearInterval(intervalId);
-  }, [isCapturingScreen, mode, pRoi, tRoi, showCelsiusConversion, defaultVolume]);
+  }, [isCapturingScreen, mode, roi, showCelsiusConversion, defaultVolume]);
 
   // 单次记录打点
   const handleAddRecord = useCallback(() => {
@@ -234,7 +252,7 @@ export const App: React.FC = () => {
   const handleToggleContinuousRecording = () => {
     if (!isContinuousRecording && records.length === 0) {
       experimentStartTimeRef.current = Date.now();
-      handleAddRecord(); // 立即记录第一个初始点
+      handleAddRecord();
     }
     setIsContinuousRecording(!isContinuousRecording);
   };
@@ -280,10 +298,7 @@ export const App: React.FC = () => {
   };
 
   const handleSeek = (time: number) => {
-    setReplayState((prev) => ({
-      ...prev,
-      currentTime: time,
-    }));
+    setReplayState((prev) => ({ ...prev, currentTime: time }));
   };
 
   const handleChangeSpeed = (speed: number) => {
@@ -321,7 +336,6 @@ export const App: React.FC = () => {
           };
         }
 
-        // 计算当前对应的记录行
         let idx = 0;
         for (let i = 0; i < records.length; i++) {
           if (records[i].time <= nextTime) {
@@ -342,7 +356,6 @@ export const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [replayState.isActive, replayState.isPlaying, replayState.speed, records]);
 
-  // 获取当前用于驱动 3D 试管与指示器的温度与高亮记录
   const activeReplayRecord = replayState.isActive && records.length > 0
     ? records[replayState.currentIndex]
     : null;
@@ -360,22 +373,26 @@ export const App: React.FC = () => {
         onOpenHelp={() => setShowHelp(true)}
       />
 
-      {/* 主界面：严格对标用户附图的三列响应式工作区 */}
+      {/* 主界面三列响应式工作区 */}
       <main className="flex-1 p-4 grid grid-cols-1 lg:grid-cols-12 gap-4 max-w-[1920px] mx-auto w-full">
         {/* ================= 模块 A：左侧——数据感知与图表分析 (占 4 列) ================= */}
         <section className="lg:col-span-4 flex flex-col space-y-4">
-          {/* 1. 实时数据窗口 */}
+          {/* 1. 实时数据窗口 (包含直接映射窗口与鼠标拖拽框选) */}
           <RealtimeDataCard
             reading={reading}
             mode={mode}
             isSimulating={isSimulating}
             isCapturingScreen={isCapturingScreen}
+            screenStream={screenStream}
             onToggleSimulate={handleToggleSimulate}
             onResetSimulate={handleResetSimulate}
             onSetSimulateTemp={handleSetSimulateTemp}
             onStartScreenCapture={handleStartScreenCapture}
             onStopScreenCapture={handleStopScreenCapture}
-            onOpenRoiModal={() => setIsRoiModalOpen(true)}
+            roi={roi}
+            onRoiChange={setRoi}
+            latestRoiCanvas={latestRoiCanvas}
+            rawOcrText={rawOcrText}
             showCelsiusConversion={showCelsiusConversion}
             onToggleCelsiusConversion={() => setShowCelsiusConversion(!showCelsiusConversion)}
           />
@@ -423,19 +440,6 @@ export const App: React.FC = () => {
           />
         </section>
       </main>
-
-      {/* 识别选区 ROI 设置弹窗 */}
-      <ScreenRoiModal
-        isOpen={isRoiModalOpen}
-        onClose={() => setIsRoiModalOpen(false)}
-        roiPressure={pRoi}
-        roiTemperature={tRoi}
-        onSaveRoi={(p, t) => {
-          setPRoi(p);
-          setTRoi(t);
-        }}
-        previewCanvas={null}
-      />
 
       {/* 教学原理与使用说明模态弹窗 */}
       <HelpModal isOpen={showHelp} onClose={() => setShowHelp(false)} />

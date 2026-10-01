@@ -10,35 +10,65 @@ export function normalizeOcrText(text: string): string {
   return text
     .replace(/[Oo]/g, '0')
     .replace(/[Il|]/g, '1')
-    .replace(/S/g, '5')
-    .replace(/B/g, '8')
     .replace(/[，,]/g, '.')
-    .replace(/\s+/g, '')
-    .replace(/[^0-9+\-.]/g, '');
+    .replace(/：/g, ':');
+}
+
+export interface ExtractedReading {
+  pressure: number | null;
+  temperature: number | null;
+  rawText: string;
 }
 
 /**
- * 从 OCR 原始识别文本中提取最可信的数字浮点值
+ * 从 OCR 原始识别文本中提取压强与温度
+ * 针对如 "当前压强: 103.2 kPa 当前温度: 293.8 K" 等常见传感器格式专项优化
  */
-export function extractNumberFromText(text: string): number | null {
-  const normalized = normalizeOcrText(text);
-  const matches = normalized.match(DECIMAL_NUMBER);
-  if (!matches || matches.length === 0) return null;
+export function extractPressureAndTemperature(text: string): ExtractedReading {
+  const clean = normalizeOcrText(text);
+  let pressure: number | null = null;
+  let temperature: number | null = null;
 
-  const candidates = matches
-    .map((candidate) => ({ text: candidate, value: Number(candidate) }))
-    .filter((candidate) => Number.isFinite(candidate.value))
-    .sort((left, right) => {
-      // 优先选带小数点的数值，其次选长度合理的数值
-      const leftHasDecimal = left.text.includes('.') ? 1 : 0;
-      const rightHasDecimal = right.text.includes('.') ? 1 : 0;
-      const leftLength = left.text.replace(/[+-.]/g, '').length;
-      const rightLength = right.text.replace(/[+-.]/g, '').length;
-      return rightHasDecimal - leftHasDecimal || rightLength - leftLength;
-    });
+  // 1. 尝试显式关键字匹配
+  const pMatch = clean.match(/(?:压强|强|P|p)[:\s]*([+-]?(?:\d+\.\d+|\d+))\s*(?:kPa|kpa)?/i);
+  if (pMatch && pMatch[1]) {
+    const val = parseFloat(pMatch[1]);
+    if (!isNaN(val)) pressure = val;
+  }
 
-  const val = candidates[0]?.value;
-  return val !== undefined && Number.isFinite(val) ? val : null;
+  const tMatch = clean.match(/(?:温度|度|T|t)[:\s]*([+-]?(?:\d+\.\d+|\d+))\s*(?:K|k|℃|°C)?/i);
+  if (tMatch && tMatch[1]) {
+    const val = parseFloat(tMatch[1]);
+    if (!isNaN(val)) temperature = val;
+  }
+
+  // 2. 如果未匹配到关键字，则按浮点数序列提取
+  const nums = clean.match(DECIMAL_NUMBER);
+  if (nums && nums.length > 0) {
+    const floatList = nums
+      .map((n) => parseFloat(n))
+      .filter((n) => !isNaN(n) && Math.abs(n) > 0.001);
+
+    if (floatList.length >= 2) {
+      if (pressure === null) pressure = floatList[0];
+      if (temperature === null) temperature = floatList[1];
+    } else if (floatList.length === 1) {
+      if (pressure === null && temperature === null) {
+        // 单个数值根据通常物理范围判断
+        if (floatList[0] > 180) {
+          temperature = floatList[0];
+        } else {
+          pressure = floatList[0];
+        }
+      } else if (pressure === null) {
+        pressure = floatList[0];
+      } else if (temperature === null) {
+        temperature = floatList[0];
+      }
+    }
+  }
+
+  return { pressure, temperature, rawText: text };
 }
 
 export class OcrRecognizerService {
@@ -53,10 +83,9 @@ export class OcrRecognizerService {
     this.isInitializing = true;
     try {
       this.worker = await createWorker('eng');
-      // 设置白名单与数字识别模式
+      // 设置宽松的识别模式，避免因中文丢弃数字和符号
       await this.worker.setParameters({
-        tessedit_char_whitelist: '0123456789.+-kPakPKC ',
-        tessedit_pageseg_mode: '7', // 单行文本识别
+        tessedit_pageseg_mode: '6', // 假设单一均匀文本块
       });
       this.isReady = true;
       this.isInitializing = false;
@@ -68,23 +97,30 @@ export class OcrRecognizerService {
     }
   }
 
-  public async recognizeNumber(canvas: HTMLCanvasElement): Promise<{ value: number | null; raw: string; confidence: number }> {
+  public async recognizeRoi(canvas: HTMLCanvasElement): Promise<{
+    pressure: number | null;
+    temperature: number | null;
+    rawText: string;
+    confidence: number;
+  }> {
     if (!this.isReady || !this.worker) {
-      return { value: null, raw: '', confidence: 0 };
+      return { pressure: null, temperature: null, rawText: '', confidence: 0 };
     }
 
     try {
       const res = await this.worker.recognize(canvas);
-      const rawText = res.data.text.trim();
-      const num = extractNumberFromText(rawText);
+      const rawText = (res.data.text || '').trim();
+      const extracted = extractPressureAndTemperature(rawText);
+
       return {
-        value: num,
-        raw: rawText,
-        confidence: (res.data.confidence || 80) / 100,
+        pressure: extracted.pressure,
+        temperature: extracted.temperature,
+        rawText,
+        confidence: (res.data.confidence || 85) / 100,
       };
     } catch (err) {
       console.error('OCR 识别执行失败:', err);
-      return { value: null, raw: '', confidence: 0 };
+      return { pressure: null, temperature: null, rawText: '', confidence: 0 };
     }
   }
 
