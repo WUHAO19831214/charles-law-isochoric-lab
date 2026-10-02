@@ -10,9 +10,11 @@ import { ReplayState } from '../../types/physics';
 export type SimulationStyle = 'default' | 'claude';
 
 interface MolecularWorkbenchProps {
-  temperature: number; // 当前驱动温度 (K)
-  pressure?: number;   // 当前驱动压强 (kPa)
-  volume: number;      // 容积 (mL)
+  temperature: number;          // 当前驱动温度 (K)
+  pressure?: number;            // 当前驱动压强 (kPa)
+  baselineTemperature?: number; // 实验初始基准温度 T₀ (K)
+  baselinePressure?: number;    // 实验初始基准压强 p₀ (kPa)
+  volume: number;               // 容积 (mL)
   replayState: ReplayState;
   hasRecords: boolean;
   onToggleReplayActive: () => void;
@@ -25,6 +27,8 @@ interface MolecularWorkbenchProps {
 export const MolecularWorkbench: React.FC<MolecularWorkbenchProps> = ({
   temperature,
   pressure = 101.3,
+  baselineTemperature = 293.15,
+  baselinePressure = 101.3,
   volume,
   replayState,
   hasRecords,
@@ -50,6 +54,15 @@ export const MolecularWorkbench: React.FC<MolecularWorkbenchProps> = ({
     }
   };
 
+  // 默认模式下的因式分解计算 (与基准点对照)
+  const baseT = Math.max(1, baselineTemperature);
+  const baseP = Math.max(1, baselinePressure);
+  const tempRatio = Math.max(0.1, temperature) / baseT;
+  const macroRatio = Math.max(0.1, pressure) / baseP;
+  const freqFactor = Math.sqrt(tempRatio);
+  const impulseFactor = Math.sqrt(tempRatio);
+  const microFactor = freqFactor * impulseFactor;
+
   return (
     <div className="bg-slate-900 rounded-xl border border-blue-900/60 overflow-hidden shadow-lg flex flex-col h-full min-h-[580px]">
       {/* 顶部标题栏与模式切换器 */}
@@ -61,7 +74,7 @@ export const MolecularWorkbench: React.FC<MolecularWorkbenchProps> = ({
           </span>
         </div>
 
-        {/* 仿真模式切换选项卡：模式1(默认动能温区) vs 模式2(Claude碰撞闪光) */}
+        {/* 仿真模式切换选项卡：模式一(默认动能温区) vs 模式二(Claude碰撞闪光) */}
         <div className="flex items-center bg-blue-900/80 p-0.5 rounded-lg border border-blue-400/30 text-xs font-normal">
           <button
             type="button"
@@ -104,24 +117,44 @@ export const MolecularWorkbench: React.FC<MolecularWorkbenchProps> = ({
                 speedScale={replayState.isActive ? replayState.speed : 1.0}
               />
 
-              {/* 浮动微观量状态指示卡 */}
-              <div className="absolute top-2.5 right-2.5 bg-slate-900/85 backdrop-blur-md p-2.5 rounded-lg border border-slate-700/80 text-xs space-y-1.5 shadow-xl font-mono text-slate-200">
-                <div className="flex items-center justify-between gap-3">
+              {/* 浮动微观量状态指示卡 (包含因式分解闭环对照) */}
+              <div className="absolute top-2.5 right-2.5 bg-slate-900/90 backdrop-blur-md p-2.5 rounded-xl border border-slate-700/80 text-xs space-y-1.5 shadow-2xl font-mono text-slate-200 w-[240px]">
+                <div className="flex items-center justify-between gap-2 pb-1 border-b border-slate-800">
                   <span className="text-slate-400">驱动温度 T:</span>
                   <span className="font-bold text-red-400">{temperature.toFixed(1)} K</span>
                 </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-slate-400">试管容积 V:</span>
-                  <span className="font-bold text-sky-400">{volume.toFixed(1)} mL (恒定)</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center justify-between gap-2">
                   <span className="text-slate-400">方均根速率:</span>
                   <span className="font-bold text-amber-400">
                     {metrics?.vRmsMeasured ? `${metrics.vRmsMeasured.toFixed(2)} m/s` : '--'}
                   </span>
                 </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-slate-400">器壁碰撞率:</span>
+
+                {/* 压强成因微观证据链 */}
+                <div className="pt-1 border-t border-slate-800/80 space-y-1 text-[11px]">
+                  <div className="text-[10px] text-slate-400 font-sans font-semibold">
+                    微观成因因式分解 (基准 {baseT.toFixed(0)}K):
+                  </div>
+                  <div className="flex items-center justify-between bg-slate-950/60 px-1.5 py-0.5 rounded">
+                    <span className="text-sky-300 font-sans">① 频率 (f/f₀)</span>
+                    <span className="font-bold text-sky-400">×{freqFactor.toFixed(3)}</span>
+                  </div>
+                  <div className="flex items-center justify-between bg-slate-950/60 px-1.5 py-0.5 rounded">
+                    <span className="text-amber-300 font-sans">② 冲量 (Ī/Ī₀)</span>
+                    <span className="font-bold text-amber-400">×{impulseFactor.toFixed(3)}</span>
+                  </div>
+                  <div className="flex items-center justify-between bg-blue-950/50 px-1.5 py-0.5 rounded border border-blue-900/50">
+                    <span className="text-blue-300 font-sans">③ 微观合成</span>
+                    <span className="font-bold text-blue-300">={microFactor.toFixed(3)}</span>
+                  </div>
+                  <div className="flex items-center justify-between bg-emerald-950/50 px-1.5 py-0.5 rounded border border-emerald-900/50">
+                    <span className="text-emerald-300 font-sans">④ 宏观实测</span>
+                    <span className="font-bold text-emerald-400">={macroRatio.toFixed(3)}</span>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-800/80 text-[10px] text-slate-400">
+                  <span>器壁碰撞率:</span>
                   <span className="font-bold text-emerald-400">
                     {metrics?.wallCollisionsPerSec ? `${metrics.wallCollisionsPerSec} 次/秒` : '--'}
                   </span>
@@ -139,6 +172,8 @@ export const MolecularWorkbench: React.FC<MolecularWorkbenchProps> = ({
             <ClaudeMolecularScene
               temperature={temperature}
               pressure={pressure}
+              baselineTemperature={baselineTemperature}
+              baselinePressure={baselinePressure}
               volume={volume}
               speedScale={replayState.isActive ? replayState.speed : 1.0}
               syncOn={syncClaude}

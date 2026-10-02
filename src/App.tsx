@@ -368,6 +368,12 @@ export const App: React.FC = () => {
     ? activeReplayRecord.pressure
     : reading.pressure;
 
+  // 确定宏微观对比的初始基准点 (T0, p0):
+  // 优先采用表格第 1 组打点数据；未打点时采用初始室温标况
+  const baselineRecord = records.length > 0
+    ? records[0]
+    : { temperature: 293.15, pressure: 101.3 };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans select-none">
       {/* 顶部标题栏 */}
@@ -434,6 +440,8 @@ export const App: React.FC = () => {
           <MolecularWorkbench
             temperature={currentDrivenTemperature}
             pressure={currentDrivenPressure}
+            baselineTemperature={baselineRecord.temperature}
+            baselinePressure={baselineRecord.pressure}
             volume={defaultVolume}
             replayState={replayState}
             hasRecords={records.length > 0}
