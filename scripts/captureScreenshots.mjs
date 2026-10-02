@@ -228,8 +228,23 @@ async function main() {
     console.log('📷 截图 5: 实验原理与教学指南弹窗...');
     await client.captureScreenshot('05-experiment-guide-modal.png');
 
+    // 6. 关闭弹窗并切换至 Claude 碰撞闪光微观模拟模式
+    console.log('✨ 切换至 Claude 碰撞闪光微观仿真模式...');
+    await client.evaluate(`
+      (function() {
+        const closeBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent && b.textContent.includes('了解并返回工作台'));
+        if (closeBtn) closeBtn.click();
+        const claudeBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent && b.textContent.includes('碰撞闪光'));
+        if (claudeBtn) claudeBtn.click();
+      })()
+    `);
+    await sleep(1500);
+
+    console.log('📷 截图 6: Claude 碰撞微闪光与半球底圆底试管微观仿真模式...');
+    await client.captureScreenshot('06-claude-collision-flash-mode.png');
+
     client.close();
-    console.log('🎉 5 张精选高清教学截图采集完成！');
+    console.log('🎉 全部精选高清教学截图采集完成！');
   } finally {
     chromeProcess.kill('SIGTERM');
     try {

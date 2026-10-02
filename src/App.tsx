@@ -364,6 +364,10 @@ export const App: React.FC = () => {
     ? activeReplayRecord.temperature
     : reading.temperature;
 
+  const currentDrivenPressure = replayState.isActive && activeReplayRecord
+    ? activeReplayRecord.pressure
+    : reading.pressure;
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans select-none">
       {/* 顶部标题栏 */}
@@ -429,6 +433,7 @@ export const App: React.FC = () => {
         <section className="lg:col-span-4 flex flex-col">
           <MolecularWorkbench
             temperature={currentDrivenTemperature}
+            pressure={currentDrivenPressure}
             volume={defaultVolume}
             replayState={replayState}
             hasRecords={records.length > 0}
