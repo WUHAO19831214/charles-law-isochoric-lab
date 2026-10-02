@@ -32,12 +32,12 @@ export const DataTable: React.FC<DataTableProps> = ({
   highlightRecordId,
 }) => {
   const [showClearConfirm, setShowClearConfirm] = useState(false);
-  const tableEndRef = useRef<HTMLTableRowElement>(null);
+  const tableContainerRef = useRef<HTMLDivElement>(null);
 
-  // 记录追加时自动滚动到底部
+  // 记录追加时自动滚动内部表格到底部 (不影响全局页面滚动条)
   useEffect(() => {
-    if (!highlightRecordId) {
-      tableEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!highlightRecordId && tableContainerRef.current) {
+      tableContainerRef.current.scrollTop = tableContainerRef.current.scrollHeight;
     }
   }, [records.length, highlightRecordId]);
 
@@ -157,7 +157,7 @@ export const DataTable: React.FC<DataTableProps> = ({
       )}
 
       {/* 数据表格主体 - 严格对照附图表头：时间 (s) | 压强 (kPa) | 热力学温度 (K) | 体积 (ml) */}
-      <div className="flex-1 overflow-y-auto max-h-[260px] scrollbar-thin scrollbar-thumb-slate-700">
+      <div ref={tableContainerRef} className="flex-1 overflow-y-auto max-h-[260px] scrollbar-thin scrollbar-thumb-slate-700">
         <table className="w-full text-center border-collapse">
           <thead className="sticky top-0 bg-blue-700 text-white text-xs font-bold shadow-md z-10 select-none">
             <tr>
@@ -212,7 +212,6 @@ export const DataTable: React.FC<DataTableProps> = ({
                 );
               })
             )}
-            <tr ref={tableEndRef} />
           </tbody>
         </table>
       </div>

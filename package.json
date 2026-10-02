@@ -1,12 +1,14 @@
 {
-  "name": "tianshan-gas-antigravity",
+  "name": "charles-law-isochoric-lab",
+  "description": "“气体等容变化（查理定律）”数字化教学与微观分子 3D 可视化实验工作台",
   "private": true,
   "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node scripts/verifyPhysics.mjs"
   },
   "dependencies": {
     "chart.js": "^4.4.1",

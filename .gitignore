@@ -1,6 +1,36 @@
+# Dependencies
 node_modules
+npm-cache
+.pnp
+.pnp.js
+
+# Production build outputs
 dist
 dist-ssr
-npm-cache
-*.local
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor & OS files
 .DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.idea
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Environment variables & local test files
+*.local
+.env
+.env.*
+!.env.example
